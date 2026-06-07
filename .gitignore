@@ -47,6 +47,9 @@ venv/
 # ---- Local agent config (CLAUDE.md at repo root stays tracked) ----
 .claude/
 
+# ---- Private planning docs (personal / not for publication) ----
+Trading_System_Roadmap.md
+
 # ---- Editor / OS ----
 .vscode/
 .idea/
