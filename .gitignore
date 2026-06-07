@@ -1,0 +1,55 @@
+# ---- Data (gitignored from the very first commit, BEFORE any data exists) ----
+# Real market data (NASDAQ ITCH / Databento MBO) is large and may be licensed.
+# Only data/README.md is tracked; everything else under data/ stays local.
+# NOTE: ignore the directory CONTENTS (/data/*), not the directory itself —
+# git cannot re-include a file whose parent directory is excluded.
+/data/*
+!/data/README.md
+
+# ---- Build output ----
+/build/
+build*/
+cmake-build-*/
+/dist/
+/wheelhouse/
+*.egg-info/
+
+# ---- CMake junk ----
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Compiled artifacts ----
+*.so
+*.pyd
+*.dll
+*.dylib
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.ilk
+*.pdb
+
+# ---- Local agent config (CLAUDE.md at repo root stays tracked) ----
+.claude/
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

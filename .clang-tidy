@@ -1,0 +1,13 @@
+# clang-tidy config for first-party C++ (core/). Run in CI; advisory locally.
+# Checks are scoped to our own headers via HeaderFilterRegex so we don't lint
+# pybind11 / standard-library headers.
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  modernize-*,
+  readability-*,
+  cppcoreguidelines-*,
+  -modernize-use-trailing-return-type
+WarningsAsErrors: ''
+HeaderFilterRegex: 'core/include/.*'

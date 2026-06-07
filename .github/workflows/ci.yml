@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # ---- C++: configure, build, ctest, clang-tidy -------------------------------
+  cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-tidy
+          python -m pip install --upgrade pip pybind11
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build
+      - name: Test (ctest)
+        run: ctest --test-dir build --output-on-failure
+      - name: clang-tidy (first-party sources)
+        run: clang-tidy -p build core/src/version.cpp
+
+  # ---- Python: build the wheel, import the binding, pytest, lint, types --------
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package + dev deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .[dev]
+      - name: pytest (imports the compiled binding)
+        run: python -m pytest tests/python -v
+      - name: ruff
+        run: python -m ruff check research tests
+      - name: mypy
+        run: python -m mypy research

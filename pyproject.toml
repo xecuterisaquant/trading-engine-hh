@@ -1,0 +1,44 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "trading-sim"
+version = "0.0.0"
+description = "Low-latency trading simulator: C++ core + Python research layer"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Harsh", email = "harshhari2002@gmail.com" }]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff", "mypy"]
+
+# --- scikit-build-core: drives the SAME CMakeLists.txt used for standalone builds ---
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.20"
+build.verbose = true
+# During `pip install`, only the python module matters. Tests are exercised
+# separately via CTest (C++) and pytest (Python), and -Werror is relaxed so a
+# stray compiler-version warning can't break an install.
+cmake.args = ["-DTRADING_SIM_BUILD_TESTS=OFF", "-DTRADING_SIM_WERROR=OFF"]
+# Ship the pure-Python research layer in the wheel alongside the extension.
+wheel.packages = ["research"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true
