@@ -6,30 +6,63 @@ on:
 
 jobs:
   # ---- C++: configure, build, ctest, clang-tidy -------------------------------
+  # Runs on BOTH Linux (GCC) and Windows (MSVC) so the platform we actually
+  # develop on is gated, and the MSVC /O2 /arch:AVX2 flag branch is exercised.
   cpp:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false          # let Windows finish even if Linux fails, and vice-versa
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Install build tooling
+
+      # Linux: GCC is preinstalled; we add Ninja + clang-tidy and pybind11.
+      - name: Install build tooling (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build clang-tidy
           python -m pip install --upgrade pip pybind11
-      - name: Configure
+      # Windows: the Visual Studio generator finds MSVC on its own (no vcvars
+      # needed in CI); we only need pybind11 so CMake can locate its cmakedir.
+      - name: Install build tooling (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pip install --upgrade pip pybind11
+
+      # Generators differ per OS: Ninja (single-config) on Linux, Visual Studio
+      # (multi-config) on Windows. We pass both CMAKE_BUILD_TYPE and --config so
+      # each command is correct regardless of which generator is active.
+      - name: Configure (Linux — Ninja)
+        if: runner.os == 'Linux'
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: Configure (Windows — Visual Studio)
+        if: runner.os == 'Windows'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
       - name: Build
-        run: cmake --build build
+        run: cmake --build build --config Release
       - name: Test (ctest)
-        run: ctest --test-dir build --output-on-failure
-      - name: clang-tidy (first-party sources)
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      # clang-tidy is Linux-only here (not packaged on the Windows runner). It is
+      # advisory: WarningsAsErrors is empty in .clang-tidy, so it never fails CI.
+      - name: clang-tidy (Linux only, first-party sources)
+        if: runner.os == 'Linux'
         run: clang-tidy -p build core/src/version.cpp
 
   # ---- Python: build the wheel, import the binding, pytest, lint, types --------
+  # Also matrixed across Linux + Windows: on Windows scikit-build-core drives the
+  # MSVC toolchain, which is ABI-matched to the MSVC-built CPython we bind against.
   python:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

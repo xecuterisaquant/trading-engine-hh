@@ -1,4 +1,7 @@
-# clang-tidy config for first-party C++ (core/). Run in CI; advisory locally.
+# clang-tidy config for first-party C++ (core/).
+# ADVISORY everywhere: WarningsAsErrors is empty, so tidy reports findings but
+# never fails CI. To make a curated subset blocking later, set e.g.
+#   WarningsAsErrors: 'bugprone-*,performance-*'
 # Checks are scoped to our own headers via HeaderFilterRegex so we don't lint
 # pybind11 / standard-library headers.
 Checks: >

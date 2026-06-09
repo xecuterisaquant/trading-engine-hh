@@ -9,7 +9,7 @@ about on a whiteboard, not just to run.
 > **Status: v0.0.0 — skeleton.** Build system, C++↔Python binding, CI, and project
 > structure are in place and green. Core components (order book, matching, fills,
 > strategies) are not built yet — see the [Roadmap](#roadmap). The
-> working agreement for how this project is developed is in `.claude/CLAUDE.md`.
+> working agreement for how this project is developed is in `CLAUDE.md`.
 
 ## Vision
 

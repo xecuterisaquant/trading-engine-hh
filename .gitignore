@@ -44,8 +44,9 @@ venv/
 *.ilk
 *.pdb
 
-# ---- Local agent config (CLAUDE.md at repo root stays tracked) ----
+# ---- Local agent config (kept local; not published in this portfolio repo) ----
 .claude/
+CLAUDE.md
 
 # ---- Private planning docs (personal / not for publication) ----
 Trading_System_Roadmap.md
