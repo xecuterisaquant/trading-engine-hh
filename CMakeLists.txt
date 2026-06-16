@@ -108,4 +108,10 @@ if(TRADING_SIM_BUILD_TESTS)
     add_executable(cpp_smoke_test tests/cpp/test_smoke.cpp)
     target_link_libraries(cpp_smoke_test PRIVATE trading_sim_core trading_sim_flags)
     add_test(NAME cpp_smoke_test COMMAND cpp_smoke_test)
+
+    # event.hpp is header-only; linking trading_sim_core provides the include
+    # path and compiles its static_asserts (sizeof==48 etc.) into a real TU.
+    add_executable(cpp_event_test tests/cpp/test_event.cpp)
+    target_link_libraries(cpp_event_test PRIVATE trading_sim_core trading_sim_flags)
+    add_test(NAME cpp_event_test COMMAND cpp_event_test)
 endif()
