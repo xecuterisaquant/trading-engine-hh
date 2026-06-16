@@ -8,8 +8,9 @@ about on a whiteboard, not just to run.
 
 > **Status: v0.0.0 — skeleton.** Build system, C++↔Python binding, CI, and project
 > structure are in place and green. Core components (order book, matching, fills,
-> strategies) are not built yet — see the [Roadmap](#roadmap). The
-> working agreement for how this project is developed is in `CLAUDE.md`.
+> strategies) are not built yet — see the [Roadmap](#roadmap). How this project is
+> developed — teach-first, core hand-written — is described under
+> [Acknowledgements](#acknowledgements).
 
 ## Vision
 
@@ -151,6 +152,20 @@ mypy research
 | 2A | Latency benchmarking + optimization | 🔲 planned |
 | 2B | Research framework (walk-forward, DSR) + a strategy | 🔲 planned |
 | 3  | Paper deployment + track record | 🔲 planned |
+
+## Acknowledgements
+
+Built with [Claude Code](https://claude.com/claude-code) (Anthropic) as a pair
+programmer and, more importantly, as a **teacher**. The working agreement is
+deliberate and the order matters: Claude explains each concept and its design
+trade-offs *before* any code is written; the interview-critical core — the limit
+order book, the matching loop, queue-position and fill logic — is **hand-written
+by me**, with Claude limited to teaching, review, and debugging on those parts;
+and nothing is treated as "done" until I can explain every line cold, unaided.
+
+The AI compressed the learning curve on low-latency C++ and market-data
+internals. The design decisions, and the understanding behind them, are my own —
+which is the entire point of the project.
 
 ## License
 
