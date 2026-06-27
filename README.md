@@ -6,10 +6,13 @@ development and validation, bridged by **pybind11**. Built for correctness and
 **defensibility** — every component is designed to be explained and reasoned
 about on a whiteboard, not just to run.
 
-> **Status: v0.0.0 — skeleton.** Build system, C++↔Python binding, CI, and project
-> structure are in place and green. Core components (order book, matching, fills,
-> strategies) are not built yet — see the [Roadmap](#roadmap). How this project is
-> developed — teach-first, core hand-written — is described under
+> **Status: v0.0.0 — early build.** The skeleton (build system, C++↔Python
+> binding, CI) is green, and the **market-data ingest layer** has begun: a typed
+> `Event` representation and a validated DBN (Databento MBO) wire parser are landed
+> and unit-tested. The interview-critical core (order book, matching, queue-aware
+> fills) is **deliberately not built yet** — it is hand-written by the author once
+> the data layer that feeds it is solid. See the [Roadmap](#roadmap); how this
+> project is developed — teach-first, core hand-written — is described under
 > [Acknowledgements](#acknowledgements).
 
 ## Vision
@@ -146,9 +149,9 @@ mypy research
 | Phase | Component | Status |
 |-------|-----------|--------|
 | 0  | Repo skeleton, build system, CI, binding | ✅ done |
-| 1  | Limit order book + matching engine | 🔲 planned |
-| 1  | Market-data (MBO) replay | 🔲 planned |
-| 1  | Queue-position-aware fill model | 🔲 planned |
+| 1  | Market-data (MBO) ingest: typed `Event` + DBN parser | 🚧 in progress |
+| 1  | Limit order book + matching engine | 🔲 planned (author-written) |
+| 1  | Queue-position-aware fill model | 🔲 planned (author-written) |
 | 2A | Latency benchmarking + optimization | 🔲 planned |
 | 2B | Research framework (walk-forward, DSR) + a strategy | 🔲 planned |
 | 3  | Paper deployment + track record | 🔲 planned |
