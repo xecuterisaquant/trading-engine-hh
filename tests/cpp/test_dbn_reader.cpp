@@ -405,5 +405,124 @@ int main() {
         fs::remove(tmp, ec);
     }
 
+    // =======================================================================
+    // MmapDbnReader: same contract as DbnReader (routing, corrupt-stop, version
+    // guard) but over a whole-file mmap. We reuse the same synthetic streams to
+    // prove BOTH readers agree byte-for-byte. Exit codes 70+.
+    // =======================================================================
+
+    // --- Case J: mmap reader skips non-MBO + bad record, emits two good, clean EOF
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmp = fs::temp_directory_path() / "ts_mmapreader_j.bin";
+
+        std::vector<byte> stream;
+        append_prologue(stream, 4u);
+        const ts::WireMbo m0 = make_mbo('A', 'B', 111u, 1000);
+        append_bytes(stream, &m0, sizeof(m0));
+        std::array<byte, 16> nonmbo{};
+        nonmbo[0] = byte{4};
+        nonmbo[1] = byte{0x15};
+        append_bytes(stream, nonmbo.data(), nonmbo.size());
+        const ts::WireMbo bad = make_mbo('Z', 'B', 999u, 9999);
+        append_bytes(stream, &bad, sizeof(bad));
+        const ts::WireMbo m1 = make_mbo('C', 'A', 222u, 2000);
+        append_bytes(stream, &m1, sizeof(m1));
+
+        {
+            std::ofstream out(tmp, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(stream.data()),
+                      static_cast<std::streamsize>(stream.size()));
+        }
+
+        {   // reader scoped so the mapping is released before remove (Windows lock)
+            ts::MmapDbnReader reader(tmp);
+
+            const auto e0 = reader.next();
+            if (!e0)                  return 70;
+            if (e0->order_id != 111u) return 71;
+            if (e0->price    != 1000) return 72;
+
+            const auto e1 = reader.next();
+            if (!e1)                  return 73;
+            if (e1->order_id != 222u) return 74;
+
+            const auto e2 = reader.next();
+            if (e2)                   return 75;
+            if (reader.failed())      return 76;
+        }
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    }
+
+    // --- Case K: mmap reader emits one, then STOPS + fails on a length-0 record --
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmp = fs::temp_directory_path() / "ts_mmapreader_k.bin";
+
+        std::vector<byte> stream;
+        append_prologue(stream, 0u);
+        const ts::WireMbo m0 = make_mbo('A', 'B', 77u, 700);
+        append_bytes(stream, &m0, sizeof(m0));
+        std::array<byte, 8> corrupt{};   // length 0 -> Corrupt
+        append_bytes(stream, corrupt.data(), corrupt.size());
+
+        {
+            std::ofstream out(tmp, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(stream.data()),
+                      static_cast<std::streamsize>(stream.size()));
+        }
+
+        {
+            ts::MmapDbnReader reader(tmp);
+
+            const auto e0 = reader.next();
+            if (!e0)                 return 80;
+            if (e0->order_id != 77u) return 81;
+
+            const auto e1 = reader.next();
+            if (e1)                  return 82;
+            if (!reader.failed())    return 83;
+        }
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    }
+
+    // --- Case L: mmap reader also REFUSES an unsupported version at construction -
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmp = fs::temp_directory_path() / "ts_mmapreader_l.bin";
+
+        std::vector<byte> stream;
+        std::array<byte, 8> hdr{};
+        hdr[0] = byte{'D'};
+        hdr[1] = byte{'B'};
+        hdr[2] = byte{'N'};
+        hdr[3] = byte{2};   // unsupported version
+        stream.insert(stream.end(), hdr.begin(), hdr.end());
+        const ts::WireMbo m0 = make_mbo('A', 'B', 1u, 100);
+        append_bytes(stream, &m0, sizeof(m0));
+
+        {
+            std::ofstream out(tmp, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(stream.data()),
+                      static_cast<std::streamsize>(stream.size()));
+        }
+
+        bool threw = false;
+        try {
+            ts::MmapDbnReader reader(tmp);
+            (void)reader;
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        if (!threw) return 90;
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    }
+
     return 0;
 }
