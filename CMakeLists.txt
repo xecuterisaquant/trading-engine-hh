@@ -65,6 +65,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(trading_sim_core STATIC
     core/src/version.cpp
+    core/src/memory_mapped_file.cpp   # platform mmap/MapViewOfFile behind an #ifdef
 )
 target_include_directories(trading_sim_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/core/include
@@ -126,6 +127,12 @@ if(TRADING_SIM_BUILD_TESTS)
     add_executable(cpp_dbn_reader_test tests/cpp/test_dbn_reader.cpp)
     target_link_libraries(cpp_dbn_reader_test PRIVATE trading_sim_core trading_sim_flags)
     add_test(NAME cpp_dbn_reader_test COMMAND cpp_dbn_reader_test)
+
+    # MemoryMappedFile: RAII whole-file mmap (POSIX) / MapViewOfFile (Windows). The
+    # test maps real temp files, so it links the core lib for the .cpp platform impl.
+    add_executable(cpp_memory_mapped_file_test tests/cpp/test_memory_mapped_file.cpp)
+    target_link_libraries(cpp_memory_mapped_file_test PRIVATE trading_sim_core trading_sim_flags)
+    add_test(NAME cpp_memory_mapped_file_test COMMAND cpp_memory_mapped_file_test)
 endif()
 
 # ---------------------------------------------------------------------------
