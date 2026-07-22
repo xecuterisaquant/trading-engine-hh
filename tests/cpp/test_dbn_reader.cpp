@@ -363,5 +363,47 @@ int main() {
         fs::remove(tmp, ec);
     }
 
+    // --- Case I: an unsupported DBN version is REFUSED at construction --------
+    // Our WireMbo layout is validated for v1 only. A v2/v3 file could place fields
+    // at different offsets, so the reader must reject it LOUDLY (throw) at ctor time
+    // rather than decode through the wrong layout and silently forge garbage Events.
+    // We hand-build the header here (append_prologue hardcodes v1) to set version 2.
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmp = fs::temp_directory_path() / "ts_dbnreader_i.bin";
+
+        std::vector<byte> stream;
+        std::array<byte, 8> hdr{};
+        hdr[0] = byte{'D'};
+        hdr[1] = byte{'B'};
+        hdr[2] = byte{'N'};
+        hdr[3] = byte{2};   // version 2: a record layout we have NOT validated
+        // metadata_len (bytes 4..7) left 0 — the throw must fire before it matters.
+        stream.insert(stream.end(), hdr.begin(), hdr.end());
+        const ts::WireMbo m0 = make_mbo('A', 'B', 1u, 100);  // a would-be valid record
+        append_bytes(stream, &m0, sizeof(m0));
+
+        {
+            std::ofstream out(tmp, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(stream.data()),
+                      static_cast<std::streamsize>(stream.size()));
+        }
+
+        // The ctor runs skip_prologue_, which must throw on the bad version. The
+        // already-constructed FileByteSource member is destroyed during unwinding,
+        // closing the handle before remove (Windows lock lesson still applies).
+        bool threw = false;
+        try {
+            ts::DbnReader reader(tmp);
+            (void)reader;
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        if (!threw) return 64;
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    }
+
     return 0;
 }

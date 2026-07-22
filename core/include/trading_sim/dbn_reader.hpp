@@ -227,9 +227,14 @@ public:
         skip_prologue_();  // consume the DBN header so next() sees only records
     }
 
-    // DBN format version from the file header (1/2/3). We only SKIP the metadata,
-    // whose length is stated explicitly, so the version doesn't change how we
-    // parse — but exposing it proves we actually read and understood the header.
+    // DBN format version from the file header. Exposed for inspection, but the
+    // header value is also ENFORCED at construction: our WireMbo byte layout
+    // (dbn.hpp) is the v1 MBO record, validated field-by-field with offsetof
+    // static_asserts. A v2/v3 record could move fields, so decoding it THROUGH the
+    // v1 layout would memcpy into the wrong offsets and silently forge garbage
+    // Events — no crash, the worst failure. skip_prologue_ therefore REFUSES any
+    // version we have not validated (see kSupportedDbnVersion); if this getter
+    // returns, the stream is a version we can parse correctly.
     [[nodiscard]] std::uint8_t version() const noexcept { return version_; }
 
     [[nodiscard]] std::optional<Event> next() {
@@ -284,6 +289,14 @@ public:
 private:
     static constexpr std::uint8_t kMboRtype = 0xA0;  // DBN market-by-order rtype
 
+    // The one DBN version whose MBO record layout we have validated byte-for-byte
+    // (dbn.hpp's offsetof static_asserts). We REFUSE every other version rather than
+    // memcpy into offsets we have not verified: a mislayout emits garbage Events
+    // with no crash — the silent-corruption failure this project fears most. This is
+    // correctness over reach; widen it only after validating the new layout, not
+    // before. (Our real XNAS-ITCH MSFT slice is v1, so this rejects nothing we use.)
+    static constexpr std::uint8_t kSupportedDbnVersion = 1;
+
     // Read until `dst` is full or the source hits EOF; return bytes obtained. Loops
     // because a single read() may come up short (Unit 3's lesson) — a header/skip
     // must not trust one read to deliver everything.
@@ -314,6 +327,16 @@ private:
             throw std::runtime_error("DbnReader: not a DBN stream (bad magic)");
         }
         version_ = std::to_integer<std::uint8_t>(header[3]);
+        // Enforce the version BEFORE we skip the metadata or frame a single record:
+        // a version we have not validated must not reach the memcpy in next(). Throw
+        // (not a failed() flag) — a wrong-version file is unusable from byte one, so
+        // fail fast at construction, consistent with the bad-magic throw above.
+        if (version_ != kSupportedDbnVersion) {
+            throw std::runtime_error(
+                "DbnReader: unsupported DBN version " + std::to_string(version_) +
+                " (only v" + std::to_string(kSupportedDbnVersion) +
+                " record layout is validated)");
+        }
 
         std::uint32_t metadata_len = 0;  // u32 LE; host is little-endian (dbn.hpp)
         std::memcpy(&metadata_len, header.data() + 4, sizeof(metadata_len));
