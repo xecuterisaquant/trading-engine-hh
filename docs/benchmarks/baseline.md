@@ -85,14 +85,49 @@ We had two candidate optimizations. The data ranks them decisively:
   a knife-edge L1 fit, and the dominant cost (the 38 ns read path) is independent of
   chunk size entirely.
 
+## After: mmap built + measured (Mode C)
+
+`MmapDbnReader` (whole-file `MemoryMappedFile`) now frames directly over the mapped
+file — Copy 1 removed at the source. Three-mode run, 20 passes, same file:
+
+| Mode | ns/event (min\|med\|max) | throughput (typical) | note |
+|---|---|---|---|
+| **A — streaming e2e** | 38.0 \| 39.3 \| 42.5 | 25.5 M ev/s (~1.36 GB/s) | `DbnReader` (kernel read + framing + decode) |
+| **C — mmap e2e** | 18.2 \| 18.8 \| 20.7 | **53.3 M ev/s (~2.85 GB/s)** | `MmapDbnReader` (no copy, no assembler) |
+| **B — CPU floor** | 6.7 \| 6.9 \| 7.3 | 144 M ev/s (~7.7 GB/s) | framing + decode only |
+
+```
+A streaming e2e     = 39.3
+C mmap e2e          = 18.8
+B framing + decode  =  6.9   (CPU floor)
+A - C (mmap win)    = 20.5   <- MEASURED
+C - B (map residual)= 11.8   (page-fault / touch cost mmap cannot remove)
+parity OK: stream and mmap agree on 3,520,518 events
+```
+
+**Outcome: mmap ~2.1× throughput** (25.5 → 53.3 M ev/s), and the mmap reader decodes
+the **identical** event count as streaming (correctness cross-check, printed as
+`parity OK`).
+
+**The "ceiling vs measured" lesson, now empirical.** The predicted ceiling (`A − B`,
+the whole copy bucket) was ~32 ns/event. The *measured* win (`A − C`) is **20.5** — mmap
+removed the copy and the `ifstream` overhead but **not** the ~11.8 ns it still costs to
+fault and touch the pages. Predicted ceiling > actual win, exactly as theory said: mmap
+is a *ceiling on savings*, not a guarantee.
+
+> Note on absolute numbers: streaming `A` here reads 39 ns/event vs 45 in the initial
+> baseline above — run-to-run / thermal variance on the same machine. The **relative**
+> claims (mmap ~2×, parity, the decomposition shape) are the robust, defensible ones;
+> re-run before quoting absolutes.
+
 ## What this makes the next move
 
-1. ~~Ring buffer for ingest~~ — **deprioritized by the data.** Revisit only if a
-   profile ever shows the memmove mattering (it doesn't at 56-byte records).
-2. **`mmap` byte source** — the evidence-backed win. Design fork to decide together
-   (author): cross-platform now (`CreateFileMapping`/`MapViewOfFile` on Windows vs
-   `mmap` on POSIX) vs POSIX-first; and lifetime/ownership of the mapping. Benchmark
-   the same two modes after, and this table becomes the before/after.
+1. ~~Ring buffer for ingest~~ — **deprioritized by the data**, confirmed: even the full
+   CPU floor (B) is 6.9 ns; the memmove is a slice of that. Not worth the wrap-around
+   complexity for ingest. (Still the right tool for the order book, ADR 0010.)
+2. ~~`mmap` byte source~~ — **done and measured: ~2.1× throughput, parity verified.**
+3. **Observability** — replace silent skips with dropped/skipped-record counters.
+4. **Fuzzing** — the framer (`frame_one`) is a textbook fuzz target.
 
 _Re-run command:_
 `build/Release/bench_dbn.exe data/MSFT/xnas-itch-20260511.mbo.dbn 20`

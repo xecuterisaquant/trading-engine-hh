@@ -27,6 +27,11 @@
 //           framing + the compaction memmove (Copy 2 + the erase) + the decode
 //           (Copy 3). This is the domain a ring buffer would improve.
 //
+//   Mode C  MMAP END-TO-END. Runs the real MmapDbnReader over a whole-file mapping —
+//           Mode A with Copy 1 removed at the source. So A - C is the MEASURED mmap
+//           win (compare against A - B, the predicted ceiling), and C must yield the
+//           same event count as A (a correctness cross-check, printed as "parity").
+//
 // The decomposition is the payoff: (A per-event ns) - (B per-event ns) is roughly
 // the per-event cost of the kernel copy = the CEILING on what mmap can buy us. B's
 // own cost is where the ring buffer plays. We decide with these two numbers, not a
@@ -56,13 +61,6 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-using trading_sim::WireMbo;
-
-// Mirrors DbnReader's private routing constant. Duplicated (not exposed) on purpose:
-// the reader's kMboRtype is an implementation detail, and a benchmark that reaches
-// into privates would couple to internals it should not. If dbn.hpp ever names this
-// publicly, switch to it.
-constexpr std::uint8_t kMboRtype = 0xA0;
 
 // Read an entire file into a byte vector. Used BOTH to warm the page cache for Mode
 // A and to provide the in-RAM source for Mode B. Throws on open failure.
@@ -157,13 +155,8 @@ Stats bench_in_memory(std::span<const std::byte> file, std::size_t chunk,
         for (;;) {
             const trading_sim::Pull pull = assembler.next();
             if (pull.status == trading_sim::PullStatus::Record) {
-                const auto rtype = std::to_integer<std::uint8_t>(pull.record[1]);
-                if (rtype == kMboRtype && pull.record.size() == sizeof(WireMbo)) {
-                    WireMbo w;
-                    std::memcpy(&w, pull.record.data(), sizeof(WireMbo));
-                    if (trading_sim::to_event(w)) {
-                        ++events;
-                    }
+                if (trading_sim::route_record(pull.record)) {
+                    ++events;  // same routing/decode policy as the real readers
                 }
                 rbytes += pull.record.size();
                 continue;
@@ -184,6 +177,28 @@ Stats bench_in_memory(std::span<const std::byte> file, std::size_t chunk,
             std::chrono::duration<double, std::nano>(t1 - t0).count();
         s.events = events;
         s.record_bytes = rbytes;
+        s.pass_ns_per_event.push_back(ns / static_cast<double>(events));
+    }
+    return s;
+}
+
+// ---- Mode C: end-to-end MmapDbnReader over a whole-file mapping --------------
+// Mode A with Copy 1 removed at the source: the reader frames directly over the
+// mapped file (no kernel read, no assembler). A - C is the MEASURED mmap win; C must
+// yield the same event count as A (correctness cross-check).
+Stats bench_mmap(const char* path, int passes) {
+    Stats s;
+    for (int p = 0; p < passes; ++p) {
+        trading_sim::MmapDbnReader reader(path);
+        std::size_t events = 0;
+        const auto t0 = Clock::now();
+        for (auto e = reader.next(); e.has_value(); e = reader.next()) {
+            ++events;
+        }
+        const auto t1 = Clock::now();
+        const double ns =
+            std::chrono::duration<double, std::nano>(t1 - t0).count();
+        s.events = events;
         s.pass_ns_per_event.push_back(ns / static_cast<double>(events));
     }
     return s;
@@ -219,30 +234,52 @@ int main(int argc, char** argv) {
         // A couple of untimed warmup passes settle CPU caches / branch predictors.
         (void)bench_end_to_end(path, chunk, 2);
         (void)bench_in_memory(file, chunk, 2);
+        (void)bench_mmap(path, 2);
 
         const Stats a = bench_end_to_end(path, chunk, passes);
         Stats b = bench_in_memory(file, chunk, passes);
-        // Mode A does not track record_bytes; borrow Mode B's (same records) so its
-        // MB/s line is populated too.
+        const Stats c = bench_mmap(path, passes);
+
+        // Modes A and C do not track record_bytes; borrow Mode B's (same records) so
+        // their MB/s lines are populated too.
         Stats a_full = a;
         a_full.record_bytes = b.record_bytes;
+        Stats c_full = c;
+        c_full.record_bytes = b.record_bytes;
 
         std::printf("\n");
-        report("A e2e", a_full);
+        report("A stream", a_full);
         report("B in-mem", b);
+        report("C mmap", c_full);
 
-        // The decomposition: A - B per-event is roughly the kernel-copy cost, i.e.
-        // the ceiling on what mmap can remove. B is where a ring buffer would play.
-        std::vector<double> va = a.pass_ns_per_event, vb = b.pass_ns_per_event;
+        // Correctness cross-check: the mmap reader must yield the SAME event count as
+        // the streaming reader — otherwise one of them is wrong, and no speed number
+        // matters. This is the parity gate.
+        if (a.events != c.events) {
+            std::printf("  !! PARITY FAIL: stream=%zu mmap=%zu events\n",
+                        a.events, c.events);
+        } else {
+            std::printf("  parity OK: stream and mmap agree on %zu events\n",
+                        c.events);
+        }
+
+        // Decomposition. A - B was the PREDICTED mmap ceiling (kernel-copy cost);
+        // A - C is the ACTUAL win we got. C - B is the residual: what mmap still pays
+        // to fault/touch pages, above the pure framing+decode floor.
+        std::vector<double> va = a.pass_ns_per_event, vb = b.pass_ns_per_event,
+                            vc = c.pass_ns_per_event;
         std::sort(va.begin(), va.end());
         std::sort(vb.begin(), vb.end());
+        std::sort(vc.begin(), vc.end());
         const double a_med = va[va.size() / 2];
         const double b_med = vb[vb.size() / 2];
+        const double c_med = vc[vc.size() / 2];
         std::printf("\n  decomposition (median ns/event):\n");
-        std::printf("    A end-to-end        = %6.1f\n", a_med);
-        std::printf("    B framing+decode    = %6.1f\n", b_med);
-        std::printf("    A - B (kernel copy) = %6.1f  <- mmap ceiling\n",
-                    a_med - b_med);
+        std::printf("    A streaming e2e     = %6.1f\n", a_med);
+        std::printf("    C mmap e2e          = %6.1f\n", c_med);
+        std::printf("    B framing+decode    = %6.1f  (CPU floor)\n", b_med);
+        std::printf("    A - C (mmap win)    = %6.1f  <- MEASURED\n", a_med - c_med);
+        std::printf("    C - B (map residual)= %6.1f\n", c_med - b_med);
         return 0;
     } catch (const std::exception& ex) {
         std::fprintf(stderr, "bench_dbn error: %s\n", ex.what());
