@@ -120,4 +120,19 @@ if(TRADING_SIM_BUILD_TESTS)
     add_executable(cpp_dbn_test tests/cpp/test_dbn.cpp)
     target_link_libraries(cpp_dbn_test PRIVATE trading_sim_core trading_sim_flags)
     add_test(NAME cpp_dbn_test COMMAND cpp_dbn_test)
+
+    # dbn_reader.hpp is header-only; this TU exercises frame_one's framing decision
+    # (Ok / NeedMore / Corrupt) against hand-built buffers, including the straddle.
+    add_executable(cpp_dbn_reader_test tests/cpp/test_dbn_reader.cpp)
+    target_link_libraries(cpp_dbn_reader_test PRIVATE trading_sim_core trading_sim_flags)
+    add_test(NAME cpp_dbn_reader_test COMMAND cpp_dbn_reader_test)
 endif()
+
+# ---------------------------------------------------------------------------
+# Examples / tools
+# ---------------------------------------------------------------------------
+# replay_dbn: end-to-end driver over DbnReader — streams a real .dbn file and
+# reports version, first event, event count, and clean/corrupt end. Not a test
+# (it takes a data-file argument); build it to run the ingest stack on real data.
+add_executable(replay_dbn examples/replay_dbn.cpp)
+target_link_libraries(replay_dbn PRIVATE trading_sim_core trading_sim_flags)
