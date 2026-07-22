@@ -219,27 +219,66 @@ inline constexpr std::uint8_t kMboRtype = 0xA0;
 // (Our real XNAS-ITCH MSFT slice is v1, so this rejects nothing we use.)
 inline constexpr std::uint8_t kSupportedDbnVersion = 1;
 
-// Route + decode ONE already-framed record (a frame_one/assembler "Ok" span).
-// Returns the Event if it is a well-formed MBO; std::nullopt if the record should
-// be SKIPPED — a non-MBO rtype / wrong size (ADR 0003 routing) or a valid-framed
-// MBO with a bad action/side (ADR 0002 malformed-is-routine). It never signals
-// "stop": corruption is a FRAMING concern (frame_one), decided before we get here.
+// The outcome of routing ONE framed record. Emit -> hand back the Event; the two
+// Skip variants record WHY a record was dropped, which is what makes ingest
+// observable (see IngestStats). Collapsing them (as an optional<Event> did) throws
+// away a real distinction: an expected other-record-type is normal, a malformed MBO
+// is a data-quality signal you might alarm on — different meanings, different counts.
+enum class RouteOutcome { Emit, SkipNonMbo, SkipMalformed };
+
+struct Routed {
+    RouteOutcome outcome;
+    Event        event;  // meaningful ONLY when outcome == Emit
+};
+
+// Per-reader ingest counters. Silent skips are an observability hole; these turn
+// "how many records did we drop, and why?" into a queryable number. u64 because a
+// full trading day is tens of millions of records and this must never wrap.
+struct IngestStats {
+    std::uint64_t records           = 0;  // records framed (frame_one Ok)
+    std::uint64_t events            = 0;  // Events emitted (routed Emit)
+    std::uint64_t skipped_non_mbo   = 0;  // non-MBO rtype or wrong size (ADR 0003)
+    std::uint64_t skipped_malformed = 0;  // MBO frame, bad action/side  (ADR 0002)
+};
+
+// Route + decode ONE already-framed record (a frame_one/assembler "Ok" span). PURE:
+// it returns WHAT to do and never touches state — counting is tally()'s job, so this
+// stays trivially testable and the benchmark can call it without a reader.
 //
-// The size guard is not paranoia: memcpy'ing sizeof(WireMbo) out of a shorter
-// record would read into the FOLLOWING record's bytes and forge a garbage Event.
-[[nodiscard]] inline std::optional<Event>
+// The size guard is not paranoia: memcpy'ing sizeof(WireMbo) out of a shorter record
+// would read into the FOLLOWING record's bytes and forge a garbage Event.
+[[nodiscard]] inline Routed
 route_record(std::span<const std::byte> record) noexcept {
     const auto rtype = std::to_integer<std::uint8_t>(record[1]);
     if (rtype != kMboRtype || record.size() != sizeof(WireMbo)) {
-        return std::nullopt;  // non-MBO or malformed size: skip
+        return {RouteOutcome::SkipNonMbo, {}};  // non-MBO rtype or wrong size (ADR 0003)
     }
     WireMbo w;
     std::memcpy(&w, record.data(), sizeof(WireMbo));
     const std::expected<Event, ParseError> e = to_event(w);
     if (e) {
-        return *e;  // the payoff: raw bytes are now a trusted Event
+        return {RouteOutcome::Emit, *e};  // raw bytes are now a trusted Event
     }
-    return std::nullopt;  // bad action/side: routine malformed record (ADR 0002)
+    return {RouteOutcome::SkipMalformed, {}};  // valid frame, bad action/side (ADR 0002)
+}
+
+// Apply a routed record to a reader's stats and yield the Event to emit (or nullopt
+// to skip). Shared by BOTH readers so the counting policy lives in exactly one place.
+[[nodiscard]] inline std::optional<Event>
+tally(IngestStats& stats, const Routed& routed) noexcept {
+    ++stats.records;
+    switch (routed.outcome) {
+        case RouteOutcome::Emit:
+            ++stats.events;
+            return routed.event;
+        case RouteOutcome::SkipNonMbo:
+            ++stats.skipped_non_mbo;
+            return std::nullopt;
+        case RouteOutcome::SkipMalformed:
+            ++stats.skipped_malformed;
+            return std::nullopt;
+    }
+    return std::nullopt;  // -Wswitch: no default, so a new RouteOutcome fails to build
 }
 
 // DbnReader: the top of the ingest stack — the one object a consumer holds. It owns
@@ -284,11 +323,12 @@ public:
             const Pull p = assembler_.next();
             switch (p.status) {
                 case PullStatus::Record: {
-                    // Route + decode one framed record (shared policy, route_record).
-                    // A real Event returns immediately; nullopt means skip (non-MBO,
-                    // wrong size, or bad action/side) — loop for the next record.
-                    if (const std::optional<Event> e = route_record(p.record)) {
-                        return e;
+                    // Route + decode + tally one framed record (shared policy). A real
+                    // Event returns immediately; nullopt means skip (counted by
+                    // category in stats_) — loop for the next record.
+                    if (const std::optional<Event> e =
+                            tally(stats_, route_record(p.record))) {
+                        return *e;
                     }
                     continue;
                 }
@@ -319,6 +359,10 @@ public:
     // end of file). Lets the consumer treat "ran out cleanly" and "gave up on bad
     // framing" differently, instead of collapsing both into a silent nullopt.
     [[nodiscard]] bool failed() const noexcept { return failed_; }
+
+    // Ingest counters accumulated so far: records framed, events emitted, and the two
+    // skip categories. Turns silent drops into a queryable metric (observability).
+    [[nodiscard]] const IngestStats& stats() const noexcept { return stats_; }
 
 private:
     // Read until `dst` is full or the source hits EOF; return bytes obtained. Loops
@@ -382,6 +426,7 @@ private:
     std::vector<std::byte> scratch_;
     std::uint8_t           version_ = 0;
     bool                   failed_  = false;
+    IngestStats            stats_{};
 };
 
 // MmapDbnReader: the same ingest contract as DbnReader — same next()/version()/
@@ -421,8 +466,9 @@ public:
                 case FrameStatus::Ok: {
                     const std::span<const std::byte> rec = rest.first(r.record_size);
                     cursor_ += r.record_size;  // advance BEFORE routing (route may skip)
-                    if (const std::optional<Event> e = route_record(rec)) {
-                        return e;
+                    if (const std::optional<Event> e =
+                            tally(stats_, route_record(rec))) {
+                        return *e;
                     }
                     continue;  // skipped record; frame the next
                 }
@@ -442,6 +488,9 @@ public:
     // See DbnReader::failed(): true iff next() stopped on a corrupt frame rather than
     // a clean end of file.
     [[nodiscard]] bool failed() const noexcept { return failed_; }
+
+    // See DbnReader::stats(): same ingest counters, so both readers report identically.
+    [[nodiscard]] const IngestStats& stats() const noexcept { return stats_; }
 
 private:
     // Validate the prologue over the mapped span and set cursor_ to the first record.
@@ -476,6 +525,7 @@ private:
     std::size_t      cursor_  = 0;  // index of the next unframed byte in map_.bytes()
     std::uint8_t     version_ = 0;
     bool             failed_  = false;
+    IngestStats      stats_{};
 };
 
 }  // namespace trading_sim

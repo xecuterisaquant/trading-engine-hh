@@ -524,5 +524,58 @@ int main() {
         fs::remove(tmp, ec);
     }
 
+    // =======================================================================
+    // Observability: stats() must tally records/events/skips by category, and
+    // BOTH readers must report identical counts on the same stream. Codes 100+.
+    // Stream: good MBO (emit), non-MBO (skip_non_mbo), bad-action MBO
+    // (skip_malformed), good MBO (emit) -> records=4, events=2, each skip=1.
+    // =======================================================================
+    {
+        namespace fs = std::filesystem;
+        const fs::path tmp = fs::temp_directory_path() / "ts_stats_m.bin";
+
+        std::vector<byte> stream;
+        append_prologue(stream, 4u);
+        const ts::WireMbo m0 = make_mbo('A', 'B', 1u, 10);   // emit
+        append_bytes(stream, &m0, sizeof(m0));
+        std::array<byte, 16> nonmbo{};                        // non-MBO -> skip_non_mbo
+        nonmbo[0] = byte{4};
+        nonmbo[1] = byte{0x15};
+        append_bytes(stream, nonmbo.data(), nonmbo.size());
+        const ts::WireMbo bad = make_mbo('Z', 'B', 2u, 20);  // bad action -> malformed
+        append_bytes(stream, &bad, sizeof(bad));
+        const ts::WireMbo m1 = make_mbo('C', 'A', 3u, 30);   // emit
+        append_bytes(stream, &m1, sizeof(m1));
+
+        {
+            std::ofstream out(tmp, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(stream.data()),
+                      static_cast<std::streamsize>(stream.size()));
+        }
+
+        {   // streaming reader
+            ts::DbnReader reader(tmp);
+            while (reader.next()) { /* drain */ }
+            const ts::IngestStats st = reader.stats();
+            if (st.records != 4)           return 100;
+            if (st.events != 2)            return 101;
+            if (st.skipped_non_mbo != 1)   return 102;
+            if (st.skipped_malformed != 1) return 103;
+        }
+
+        {   // mmap reader must tally identically
+            ts::MmapDbnReader reader(tmp);
+            while (reader.next()) { /* drain */ }
+            const ts::IngestStats st = reader.stats();
+            if (st.records != 4)           return 104;
+            if (st.events != 2)            return 105;
+            if (st.skipped_non_mbo != 1)   return 106;
+            if (st.skipped_malformed != 1) return 107;
+        }
+
+        std::error_code ec;
+        fs::remove(tmp, ec);
+    }
+
     return 0;
 }

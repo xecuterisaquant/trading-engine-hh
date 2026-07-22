@@ -155,7 +155,8 @@ Stats bench_in_memory(std::span<const std::byte> file, std::size_t chunk,
         for (;;) {
             const trading_sim::Pull pull = assembler.next();
             if (pull.status == trading_sim::PullStatus::Record) {
-                if (trading_sim::route_record(pull.record)) {
+                if (trading_sim::route_record(pull.record).outcome ==
+                    trading_sim::RouteOutcome::Emit) {
                     ++events;  // same routing/decode policy as the real readers
                 }
                 rbytes += pull.record.size();
