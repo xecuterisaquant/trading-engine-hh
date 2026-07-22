@@ -136,3 +136,10 @@ endif()
 # (it takes a data-file argument); build it to run the ingest stack on real data.
 add_executable(replay_dbn examples/replay_dbn.cpp)
 target_link_libraries(replay_dbn PRIVATE trading_sim_core trading_sim_flags)
+
+# bench_dbn: throughput benchmark for the ingest hot path. Two modes (end-to-end
+# warm-cache vs isolated in-memory framing+decode) whose delta bounds what mmap and
+# a ring buffer could each buy us. Build in Release for meaningful numbers; results
+# and methodology live in docs/benchmarks/ (ADR 0019). Not a test (takes a data arg).
+add_executable(bench_dbn bench/bench_dbn.cpp)
+target_link_libraries(bench_dbn PRIVATE trading_sim_core trading_sim_flags)
