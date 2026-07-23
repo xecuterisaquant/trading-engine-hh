@@ -26,6 +26,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(TRADING_SIM_WERROR       "Treat warnings as errors on first-party code" ON)
 option(TRADING_SIM_BUILD_TESTS  "Build the C++ tests"                          ON)
 option(TRADING_SIM_BUILD_PYTHON "Build the pybind11 module"                    ON)
+# Coverage-guided libFuzzer harness (fuzz/). Clang + -fsanitize=fuzzer only, OFF by
+# default so the normal MSVC/GCC build is untouched. The portable regression fuzzer
+# (tests/cpp/test_frame_fuzz.cpp) runs everywhere regardless. See ADR 0022.
+option(TRADING_SIM_FUZZER       "Build the libFuzzer harness (clang only)"     OFF)
 
 # ---------------------------------------------------------------------------
 # Portable optimization + warning flags (INTERFACE target)
@@ -65,6 +69,7 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(trading_sim_core STATIC
     core/src/version.cpp
+    core/src/memory_mapped_file.cpp   # platform mmap/MapViewOfFile behind an #ifdef
 )
 target_include_directories(trading_sim_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/core/include
@@ -126,6 +131,30 @@ if(TRADING_SIM_BUILD_TESTS)
     add_executable(cpp_dbn_reader_test tests/cpp/test_dbn_reader.cpp)
     target_link_libraries(cpp_dbn_reader_test PRIVATE trading_sim_core trading_sim_flags)
     add_test(NAME cpp_dbn_reader_test COMMAND cpp_dbn_reader_test)
+
+    # MemoryMappedFile: RAII whole-file mmap (POSIX) / MapViewOfFile (Windows). The
+    # test maps real temp files, so it links the core lib for the .cpp platform impl.
+    add_executable(cpp_memory_mapped_file_test tests/cpp/test_memory_mapped_file.cpp)
+    target_link_libraries(cpp_memory_mapped_file_test PRIVATE trading_sim_core trading_sim_flags)
+    add_test(NAME cpp_memory_mapped_file_test COMMAND cpp_memory_mapped_file_test)
+
+    # Portable randomized fuzzer: throws random buffers at frame_one + the assembler
+    # drain loop, asserting the framing contract and (crucially) termination. Fixed
+    # seed, runs in ctest on every platform (ADR 0022).
+    add_executable(cpp_frame_fuzz_test tests/cpp/test_frame_fuzz.cpp)
+    target_link_libraries(cpp_frame_fuzz_test PRIVATE trading_sim_core trading_sim_flags)
+    add_test(NAME cpp_frame_fuzz_test COMMAND cpp_frame_fuzz_test)
+endif()
+
+# ---------------------------------------------------------------------------
+# Coverage-guided libFuzzer harness (clang only; opt-in). Guarded so this block is
+# never evaluated in the normal build — the option defaults OFF (ADR 0022).
+# ---------------------------------------------------------------------------
+if(TRADING_SIM_FUZZER)
+    add_executable(frame_fuzz fuzz/frame_fuzz_libfuzzer.cpp)
+    target_link_libraries(frame_fuzz PRIVATE trading_sim_core)
+    target_compile_options(frame_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
+    target_link_options(frame_fuzz PRIVATE -fsanitize=fuzzer,address,undefined)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -136,3 +165,10 @@ endif()
 # (it takes a data-file argument); build it to run the ingest stack on real data.
 add_executable(replay_dbn examples/replay_dbn.cpp)
 target_link_libraries(replay_dbn PRIVATE trading_sim_core trading_sim_flags)
+
+# bench_dbn: throughput benchmark for the ingest hot path. Two modes (end-to-end
+# warm-cache vs isolated in-memory framing+decode) whose delta bounds what mmap and
+# a ring buffer could each buy us. Build in Release for meaningful numbers; results
+# and methodology live in docs/benchmarks/ (ADR 0019). Not a test (takes a data arg).
+add_executable(bench_dbn bench/bench_dbn.cpp)
+target_link_libraries(bench_dbn PRIVATE trading_sim_core trading_sim_flags)

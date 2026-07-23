@@ -40,6 +40,16 @@ int main(int argc, char** argv) {
         }
 
         std::printf("total events: %zu\n", count);
+
+        // Observability: report the framed/emitted/skipped breakdown, not just the
+        // emitted count — silent drops are invisible without this.
+        const trading_sim::IngestStats& st = reader.stats();
+        std::printf("stats        : records=%llu events=%llu "
+                    "skip_non_mbo=%llu skip_malformed=%llu\n",
+                    static_cast<unsigned long long>(st.records),
+                    static_cast<unsigned long long>(st.events),
+                    static_cast<unsigned long long>(st.skipped_non_mbo),
+                    static_cast<unsigned long long>(st.skipped_malformed));
         std::printf("ended        : %s\n",
                     reader.failed() ? "CORRUPT (stopped on bad frame)"
                                     : "clean EOF");

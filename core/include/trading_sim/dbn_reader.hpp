@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "trading_sim/dbn.hpp"  // WireMbo framing convention (length == bytes/4)
+#include "trading_sim/memory_mapped_file.hpp"  // whole-file mapping for MmapDbnReader
 
 // DBN streaming reader — the layer that turns raw bytes off disk (or, later, off a
 // socket) into a sequence of validated Events. It is built bottom-up:
@@ -200,6 +201,86 @@ private:
     std::ifstream file_;
 };
 
+// ---------------------------------------------------------------------------
+// Shared record routing + protocol constants — used by BOTH readers (streaming
+// DbnReader and MmapDbnReader), so the routing/version policy lives in ONE place
+// instead of being copy-pasted per reader.
+// ---------------------------------------------------------------------------
+
+// DBN market-by-order rtype. A protocol constant at namespace scope so every
+// consumer of a framed record routes by the same value.
+inline constexpr std::uint8_t kMboRtype = 0xA0;
+
+// The one DBN version whose MBO record layout we have validated byte-for-byte
+// (dbn.hpp's offsetof static_asserts). Both readers REFUSE every other version
+// rather than memcpy into offsets we have not verified: a mislayout emits garbage
+// Events with no crash — the silent-corruption failure this project fears most.
+// Correctness over reach; widen only after validating the new layout, not before.
+// (Our real XNAS-ITCH MSFT slice is v1, so this rejects nothing we use.)
+inline constexpr std::uint8_t kSupportedDbnVersion = 1;
+
+// The outcome of routing ONE framed record. Emit -> hand back the Event; the two
+// Skip variants record WHY a record was dropped, which is what makes ingest
+// observable (see IngestStats). Collapsing them (as an optional<Event> did) throws
+// away a real distinction: an expected other-record-type is normal, a malformed MBO
+// is a data-quality signal you might alarm on — different meanings, different counts.
+enum class RouteOutcome { Emit, SkipNonMbo, SkipMalformed };
+
+struct Routed {
+    RouteOutcome outcome;
+    Event        event;  // meaningful ONLY when outcome == Emit
+};
+
+// Per-reader ingest counters. Silent skips are an observability hole; these turn
+// "how many records did we drop, and why?" into a queryable number. u64 because a
+// full trading day is tens of millions of records and this must never wrap.
+struct IngestStats {
+    std::uint64_t records           = 0;  // records framed (frame_one Ok)
+    std::uint64_t events            = 0;  // Events emitted (routed Emit)
+    std::uint64_t skipped_non_mbo   = 0;  // non-MBO rtype or wrong size (ADR 0003)
+    std::uint64_t skipped_malformed = 0;  // MBO frame, bad action/side  (ADR 0002)
+};
+
+// Route + decode ONE already-framed record (a frame_one/assembler "Ok" span). PURE:
+// it returns WHAT to do and never touches state — counting is tally()'s job, so this
+// stays trivially testable and the benchmark can call it without a reader.
+//
+// The size guard is not paranoia: memcpy'ing sizeof(WireMbo) out of a shorter record
+// would read into the FOLLOWING record's bytes and forge a garbage Event.
+[[nodiscard]] inline Routed
+route_record(std::span<const std::byte> record) noexcept {
+    const auto rtype = std::to_integer<std::uint8_t>(record[1]);
+    if (rtype != kMboRtype || record.size() != sizeof(WireMbo)) {
+        return {RouteOutcome::SkipNonMbo, {}};  // non-MBO rtype or wrong size (ADR 0003)
+    }
+    WireMbo w;
+    std::memcpy(&w, record.data(), sizeof(WireMbo));
+    const std::expected<Event, ParseError> e = to_event(w);
+    if (e) {
+        return {RouteOutcome::Emit, *e};  // raw bytes are now a trusted Event
+    }
+    return {RouteOutcome::SkipMalformed, {}};  // valid frame, bad action/side (ADR 0002)
+}
+
+// Apply a routed record to a reader's stats and yield the Event to emit (or nullopt
+// to skip). Shared by BOTH readers so the counting policy lives in exactly one place.
+[[nodiscard]] inline std::optional<Event>
+tally(IngestStats& stats, const Routed& routed) noexcept {
+    ++stats.records;
+    switch (routed.outcome) {
+        case RouteOutcome::Emit:
+            ++stats.events;
+            return routed.event;
+        case RouteOutcome::SkipNonMbo:
+            ++stats.skipped_non_mbo;
+            return std::nullopt;
+        case RouteOutcome::SkipMalformed:
+            ++stats.skipped_malformed;
+            return std::nullopt;
+    }
+    return std::nullopt;  // -Wswitch: no default, so a new RouteOutcome fails to build
+}
+
 // DbnReader: the top of the ingest stack — the one object a consumer holds. It owns
 // {FileByteSource, RecordAssembler, a scratch buffer} and, on each next(), drives
 // them until it can hand back one validated Event (or signal end-of-stream).
@@ -227,9 +308,14 @@ public:
         skip_prologue_();  // consume the DBN header so next() sees only records
     }
 
-    // DBN format version from the file header (1/2/3). We only SKIP the metadata,
-    // whose length is stated explicitly, so the version doesn't change how we
-    // parse — but exposing it proves we actually read and understood the header.
+    // DBN format version from the file header. Exposed for inspection, but the
+    // header value is also ENFORCED at construction: our WireMbo byte layout
+    // (dbn.hpp) is the v1 MBO record, validated field-by-field with offsetof
+    // static_asserts. A v2/v3 record could move fields, so decoding it THROUGH the
+    // v1 layout would memcpy into the wrong offsets and silently forge garbage
+    // Events — no crash, the worst failure. skip_prologue_ therefore REFUSES any
+    // version we have not validated (see kSupportedDbnVersion); if this getter
+    // returns, the stream is a version we can parse correctly.
     [[nodiscard]] std::uint8_t version() const noexcept { return version_; }
 
     [[nodiscard]] std::optional<Event> next() {
@@ -237,21 +323,14 @@ public:
             const Pull p = assembler_.next();
             switch (p.status) {
                 case PullStatus::Record: {
-                    // Route by rtype (ADR 0003). Only a well-formed 56-byte MBO is
-                    // converted: the size guard is not paranoia — memcpy'ing
-                    // sizeof(WireMbo) out of a shorter record would read into the
-                    // FOLLOWING record and forge a garbage Event.
-                    const auto rtype = std::to_integer<std::uint8_t>(p.record[1]);
-                    if (rtype != kMboRtype || p.record.size() != sizeof(WireMbo)) {
-                        continue;  // non-MBO or malformed size: skip
+                    // Route + decode + tally one framed record (shared policy). A real
+                    // Event returns immediately; nullopt means skip (counted by
+                    // category in stats_) — loop for the next record.
+                    if (const std::optional<Event> e =
+                            tally(stats_, route_record(p.record))) {
+                        return *e;
                     }
-                    WireMbo w;
-                    std::memcpy(&w, p.record.data(), sizeof(WireMbo));
-                    const std::expected<Event, ParseError> e = to_event(w);
-                    if (e) {
-                        return *e;  // the payoff: raw bytes are now a trusted Event
-                    }
-                    continue;  // bad action/side: routine malformed record (ADR 0002)
+                    continue;
                 }
                 case PullStatus::NeedMore: {
                     // The assembler ran dry; refill it from the source. A 0-byte
@@ -281,9 +360,11 @@ public:
     // framing" differently, instead of collapsing both into a silent nullopt.
     [[nodiscard]] bool failed() const noexcept { return failed_; }
 
-private:
-    static constexpr std::uint8_t kMboRtype = 0xA0;  // DBN market-by-order rtype
+    // Ingest counters accumulated so far: records framed, events emitted, and the two
+    // skip categories. Turns silent drops into a queryable metric (observability).
+    [[nodiscard]] const IngestStats& stats() const noexcept { return stats_; }
 
+private:
     // Read until `dst` is full or the source hits EOF; return bytes obtained. Loops
     // because a single read() may come up short (Unit 3's lesson) — a header/skip
     // must not trust one read to deliver everything.
@@ -314,6 +395,16 @@ private:
             throw std::runtime_error("DbnReader: not a DBN stream (bad magic)");
         }
         version_ = std::to_integer<std::uint8_t>(header[3]);
+        // Enforce the version BEFORE we skip the metadata or frame a single record:
+        // a version we have not validated must not reach the memcpy in next(). Throw
+        // (not a failed() flag) — a wrong-version file is unusable from byte one, so
+        // fail fast at construction, consistent with the bad-magic throw above.
+        if (version_ != kSupportedDbnVersion) {
+            throw std::runtime_error(
+                "DbnReader: unsupported DBN version " + std::to_string(version_) +
+                " (only v" + std::to_string(kSupportedDbnVersion) +
+                " record layout is validated)");
+        }
 
         std::uint32_t metadata_len = 0;  // u32 LE; host is little-endian (dbn.hpp)
         std::memcpy(&metadata_len, header.data() + 4, sizeof(metadata_len));
@@ -335,6 +426,106 @@ private:
     std::vector<std::byte> scratch_;
     std::uint8_t           version_ = 0;
     bool                   failed_  = false;
+    IngestStats            stats_{};
+};
+
+// MmapDbnReader: the same ingest contract as DbnReader — same next()/version()/
+// failed() surface, same routing (route_record) and version guard — but over a
+// whole-file memory mapping instead of a streaming byte source.
+//
+// Because the entire file is one contiguous region (MemoryMappedFile), records never
+// straddle a boundary. So this reader has NO RecordAssembler, NO scratch buffer, and
+// NO dangling-view lifetime contract — an entire buffering layer and its class of
+// use-after-free/overwrite bugs are gone. next() is just a cursor walking frame_one
+// across the mapped span. (Baseline benchmark, ADR 0019: the copy this deletes was
+// ~85% of ingest cost; the assembler it deletes was the other ~15%'s memmove.)
+//
+// End-of-stream difference from DbnReader: with the whole file already mapped, a
+// frame_one NeedMore at the cursor means the trailing bytes are a partial/empty
+// record and nothing more is coming — i.e. a CLEAN EOF, not "go read more" (there is
+// no source to read from). Corrupt still stops and sets failed() (ADR 0018); an
+// unsupported version still throws at construction (ADR 0020).
+//
+// Caveat (SIGBUS): the mapping is only valid for a stable, untruncated file — see
+// MemoryMappedFile. For our read-only historical files that holds.
+class MmapDbnReader {
+public:
+    explicit MmapDbnReader(const std::filesystem::path& path) : map_(path) {
+        skip_prologue_();  // validate header + version, position cursor_ at record 0
+    }
+
+    // See DbnReader::version(): exposed AND enforced (unsupported versions throw in
+    // skip_prologue_ before a single record is framed).
+    [[nodiscard]] std::uint8_t version() const noexcept { return version_; }
+
+    [[nodiscard]] std::optional<Event> next() {
+        for (;;) {
+            const std::span<const std::byte> rest = map_.bytes().subspan(cursor_);
+            const FrameResult r = frame_one(rest);
+            switch (r.status) {
+                case FrameStatus::Ok: {
+                    const std::span<const std::byte> rec = rest.first(r.record_size);
+                    cursor_ += r.record_size;  // advance BEFORE routing (route may skip)
+                    if (const std::optional<Event> e =
+                            tally(stats_, route_record(rec))) {
+                        return *e;
+                    }
+                    continue;  // skipped record; frame the next
+                }
+                case FrameStatus::NeedMore:
+                    // Whole file mapped: no more bytes are coming, so a partial or
+                    // empty trailing record is a clean EOF (parity with DbnReader's
+                    // short-final-read -> nullopt, failed_ stays false).
+                    return std::nullopt;
+                case FrameStatus::Corrupt:
+                    failed_ = true;
+                    return std::nullopt;
+            }
+            // No default: an added FrameStatus must fail -Wswitch (ADR 0007).
+        }
+    }
+
+    // See DbnReader::failed(): true iff next() stopped on a corrupt frame rather than
+    // a clean end of file.
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
+
+    // See DbnReader::stats(): same ingest counters, so both readers report identically.
+    [[nodiscard]] const IngestStats& stats() const noexcept { return stats_; }
+
+private:
+    // Validate the prologue over the mapped span and set cursor_ to the first record.
+    // Mirrors DbnReader::skip_prologue_ but INDEXES the span instead of reading through
+    // a source: with the whole file present there is no seek and no short-read loop —
+    // the metadata is skipped by advancing the cursor past it.
+    void skip_prologue_() {
+        const std::span<const std::byte> f = map_.bytes();
+        if (f.size() < 8) {
+            throw std::runtime_error("MmapDbnReader: truncated DBN header");
+        }
+        if (f[0] != std::byte{'D'} || f[1] != std::byte{'B'} ||
+            f[2] != std::byte{'N'}) {
+            throw std::runtime_error("MmapDbnReader: not a DBN stream (bad magic)");
+        }
+        version_ = std::to_integer<std::uint8_t>(f[3]);
+        if (version_ != kSupportedDbnVersion) {  // enforce BEFORE framing any record
+            throw std::runtime_error(
+                "MmapDbnReader: unsupported DBN version " + std::to_string(version_) +
+                " (only v" + std::to_string(kSupportedDbnVersion) +
+                " record layout is validated)");
+        }
+        std::uint32_t metadata_len = 0;  // u32 LE; host is little-endian (dbn.hpp)
+        std::memcpy(&metadata_len, f.data() + 4, sizeof(metadata_len));
+        cursor_ = std::size_t{8} + metadata_len;  // u32 + 8 cannot overflow size_t
+        if (cursor_ > f.size()) {
+            throw std::runtime_error("MmapDbnReader: truncated DBN metadata");
+        }
+    }
+
+    MemoryMappedFile map_;
+    std::size_t      cursor_  = 0;  // index of the next unframed byte in map_.bytes()
+    std::uint8_t     version_ = 0;
+    bool             failed_  = false;
+    IngestStats      stats_{};
 };
 
 }  // namespace trading_sim
